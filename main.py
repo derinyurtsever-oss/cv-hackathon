@@ -119,6 +119,12 @@ def cmd_pipeline(args):
     from src.visual_odometry import estimate_distance_from_video, calibrate_scale
     from src.annotate_video import annotate_video, save_distance_plot
 
+    FT_TO_M = 0.3048
+
+    if args.gt_distance_ft is not None:
+        args.gt_distance = args.gt_distance_ft * FT_TO_M
+        print(f"Converting {args.gt_distance_ft} ft → {args.gt_distance:.4f} m")
+
     print(f"=== Pipe Inspection Pipeline ===")
     print(f"Video : {args.video}")
     print(f"Output: {args.output}")
@@ -223,7 +229,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_pipe.add_argument("--video", required=True, help="Input inspection video")
     p_pipe.add_argument("--output", required=True, help="Output annotated video path (.mp4)")
     p_pipe.add_argument("--gt-distance", type=float, default=None, dest="gt_distance",
-                        help="Ground-truth total distance (m) for auto scale calibration")
+                        help="Ground-truth total distance in metres for auto scale calibration")
+    p_pipe.add_argument("--gt-distance-ft", type=float, default=None, dest="gt_distance_ft",
+                        help="Ground-truth total distance in FEET (auto-converted to metres)")
     p_pipe.add_argument("--scale", type=float, default=0.001,
                         help="Manual metres/pixel scale (used if --gt-distance not provided)")
     p_pipe.add_argument("--every-n", type=int, default=1, dest="every_n",
