@@ -16,3 +16,4 @@ checkpoints/
 # OS / editor
 .DS_Store
 .vscode/
+euler_test_output.txt
