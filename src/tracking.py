@@ -58,10 +58,10 @@ class FlowResult:
         return float(np.mean(np.linalg.norm(vecs, axis=1)))
 
 
-def detect_corners(gray: np.ndarray, params: dict | None = None) -> np.ndarray:
+def detect_corners(gray: np.ndarray, params: dict | None = None, mask: np.ndarray | None = None) -> np.ndarray:
     """Detect Shi-Tomasi corners for seeding Lucas-Kanade tracking."""
     p = params or SHI_TOMASI_PARAMS
-    pts = cv2.goodFeaturesToTrack(gray, **p)
+    pts = cv2.goodFeaturesToTrack(gray, mask=mask, **p)
     return pts if pts is not None else np.empty((0, 1, 2), dtype=np.float32)
 
 

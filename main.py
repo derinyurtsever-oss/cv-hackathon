@@ -130,6 +130,7 @@ def cmd_pipeline(args):
         scale_m_per_px=1.0,
         every_n_frames=args.every_n,
         max_frames=args.max_frames,
+        water_mask_fraction=args.water_mask,
     )
 
     # --- Calibrate scale if ground-truth distance provided ---
@@ -228,6 +229,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_pipe.add_argument("--every-n", type=int, default=1, dest="every_n",
                         help="Process every N-th frame (speeds up long videos)")
     p_pipe.add_argument("--max-frames", type=int, default=None, dest="max_frames")
+    p_pipe.add_argument("--water-mask", type=float, default=0.0, dest="water_mask",
+                        help="Mask bottom fraction of frame to exclude water (e.g. 0.3 = bottom 30%%))")
     p_pipe.add_argument("--plot", default=None, help="Save cumulative distance plot to this path")
 
     return parser

@@ -74,20 +74,33 @@ def calibrate_scale(
     return ground_truth_distance_m / total_pixels
 
 
+def _make_wall_mask(h: int, w: int, bottom_fraction: float) -> np.ndarray:
+    """
+    Create a mask that zeros out the bottom `bottom_fraction` of the frame.
+    Keeps only the pipe wall region (top and sides) for feature tracking,
+    excluding water/sediment in the bottom of the pipe.
+    """
+    mask = np.ones((h, w), dtype=np.uint8) * 255
+    cutoff = int(h * (1.0 - bottom_fraction))
+    mask[cutoff:, :] = 0
+    return mask
+
+
 def _frame_displacement(
     prev_gray: np.ndarray,
     curr_gray: np.ndarray,
     prev_pts: np.ndarray | None,
     min_points: int = 10,
     redetect_threshold: int = 20,
+    wall_mask: np.ndarray | None = None,
 ) -> tuple[float, np.ndarray | None]:
     """
-    Compute median optical-flow displacement between two grayscale frames.
-
-    Returns (median_displacement_pixels, updated_points_for_next_frame).
+    Estimate forward displacement between two frames by fitting an affine
+    transform and extracting only the translation magnitude.
+    wall_mask excludes water/sediment in the bottom of the pipe.
     """
     if prev_pts is None or len(prev_pts) < redetect_threshold:
-        prev_pts = detect_corners(prev_gray)
+        prev_pts = detect_corners(prev_gray, mask=wall_mask)
 
     if len(prev_pts) == 0:
         return 0.0, None
@@ -99,10 +112,24 @@ def _frame_displacement(
     if len(good_curr) < min_points:
         return 0.0, None
 
-    displacements = np.linalg.norm(good_curr - good_prev, axis=1)
-    median_disp = float(np.median(displacements))
+    # Fit a partial affine transform (rotation + scale + translation)
+    # RANSAC rejects outliers caused by independently moving objects or noise
+    transform, inliers = cv2.estimateAffinePartial2D(
+        good_prev.reshape(-1, 1, 2),
+        good_curr.reshape(-1, 1, 2),
+        method=cv2.RANSAC,
+        ransacReprojThreshold=3.0,
+    )
 
-    return median_disp, good_curr.reshape(-1, 1, 2)
+    if transform is None:
+        return 0.0, good_curr.reshape(-1, 1, 2)
+
+    # Extract translation component only (tx, ty) — ignores rotation & scale
+    tx = transform[0, 2]
+    ty = transform[1, 2]
+    translation_mag = float(np.sqrt(tx ** 2 + ty ** 2))
+
+    return translation_mag, good_curr.reshape(-1, 1, 2)
 
 
 def estimate_distance(
@@ -110,6 +137,7 @@ def estimate_distance(
     scale_m_per_px: float = 1.0,
     redetect_interval: int = 30,
     min_points: int = 10,
+    water_mask_fraction: float = 0.0,
 ) -> OdometryResult:
     """
     Estimate cumulative distance across a list of BGR frames.
@@ -124,6 +152,10 @@ def estimate_distance(
         Force corner re-detection every N frames.
     min_points : int
         Minimum tracked points before re-detecting.
+    water_mask_fraction : float
+        Fraction of frame height to mask from the bottom (0.0 = no mask,
+        0.3 = bottom 30% excluded). Use when water flows in the bottom
+        of the pipe and corrupts feature tracking.
 
     Returns
     -------
@@ -134,6 +166,9 @@ def estimate_distance(
     prev_gray = cv2.cvtColor(frames[0], cv2.COLOR_BGR2GRAY)
     prev_pts: np.ndarray | None = None
 
+    h, w = prev_gray.shape[:2]
+    wall_mask = _make_wall_mask(h, w, water_mask_fraction) if water_mask_fraction > 0 else None
+
     for i in range(1, len(frames)):
         curr_gray = cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY)
 
@@ -141,7 +176,7 @@ def estimate_distance(
         if force_redetect:
             prev_pts = None
 
-        disp_px, prev_pts = _frame_displacement(prev_gray, curr_gray, prev_pts, min_points)
+        disp_px, prev_pts = _frame_displacement(prev_gray, curr_gray, prev_pts, min_points, wall_mask=wall_mask)
         dist_m = disp_px * scale_m_per_px
         cumulative += dist_m
 
@@ -165,6 +200,7 @@ def estimate_distance_from_video(
     every_n_frames: int = 1,
     max_frames: int | None = None,
     redetect_interval: int = 30,
+    water_mask_fraction: float = 0.0,
 ) -> OdometryResult:
     """
     Convenience wrapper: run visual odometry directly on a video file.
@@ -179,6 +215,8 @@ def estimate_distance_from_video(
         Process every N-th frame (1 = all frames).
     max_frames : int, optional
         Stop after this many frames.
+    water_mask_fraction : float
+        Fraction of frame height to ignore from the bottom (e.g. 0.3 = bottom 30%).
     """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -198,4 +236,9 @@ def estimate_distance_from_video(
     cap.release()
 
     print(f"Loaded {len(frames)} frames from '{video_path}'")
-    return estimate_distance(frames, scale_m_per_px=scale_m_per_px, redetect_interval=redetect_interval)
+    return estimate_distance(
+        frames,
+        scale_m_per_px=scale_m_per_px,
+        redetect_interval=redetect_interval,
+        water_mask_fraction=water_mask_fraction,
+    )
