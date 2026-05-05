@@ -566,8 +566,8 @@ let annShown=new Set(), lastPct=-1;
 function showAnn(a,idx){
   const items=document.getElementById('ann-items');
   const existing=[...items.querySelectorAll('.ann-item')];
-  // Evict oldest when panel is full (>= 5 items)
-  if(existing.length>=5){
+  // Evict oldest when panel is full (>= 3 items)
+  if(existing.length>=3){
     const first=existing[0];
     const h=first.offsetHeight;
     first.style.maxHeight=h+'px';
