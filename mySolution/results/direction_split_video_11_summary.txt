@@ -1,9 +1,0 @@
-video=11
-turn=642
-gap=0
-inward_to_return_raw_mae=15.167758
-inward_to_return_monotone_mae=9.571602
-triangle_return_mae=3.302318
-return_to_inward_raw_mae=12.468878
-return_to_inward_monotone_mae=12.342171
-triangle_inward_mae=4.782492

@@ -2,7 +2,7 @@ import numpy as np
 import os
 
 from MovementPath import MovementPath
-from .localization_model import predict_video_path
+from .hybrid_library_model import predict_video_path
 
 
 class MovementPathEstimator:
