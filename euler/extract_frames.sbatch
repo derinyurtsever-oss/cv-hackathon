@@ -2,9 +2,9 @@
 #SBATCH --job-name=cv-extract-frames
 #SBATCH --output=logs/extract_frames_%j.out
 #SBATCH --error=logs/extract_frames_%j.err
-#SBATCH --time=12:00:00
-#SBATCH --cpus-per-task=4
-#SBATCH --mem-per-cpu=4G
+#SBATCH --time=03:00:00
+#SBATCH --cpus-per-task=2
+#SBATCH --mem-per-cpu=2G
 
 set -euo pipefail
 
