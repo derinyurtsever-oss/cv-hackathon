@@ -137,26 +137,24 @@ uv run python compare_estimators.py
 
 ## Simple local run
 
-For the submitted solution, you can also use the repo-root entrypoint:
+Run the submitted estimator directly from the repository root:
 
-```bash
-python main.py
-```
+`ash
+python mySolution/MovementPathEstimator.py
+`
 
 Useful variants:
 
-```bash
-python main.py --video 10
-python main.py --no-score
-```
+`ash
+python mySolution/MovementPathEstimator.py --video 10
+python mySolution/MovementPathEstimator.py --no-score
+`
 
-This expects the usual repository data layout next to `main.py`:
+This expects the usual repository data layout next to the repo root:
 
-- `frame_images/`
-- `channel_lengths.npy`
-- `distance_labels/` if scoring/training labels are available
-
-Run `main.py` from the repository root.
+- rame_images/
+- channel_lengths.npy
+- distance_labels/ if scoring/training labels are available
 
 ---
 
