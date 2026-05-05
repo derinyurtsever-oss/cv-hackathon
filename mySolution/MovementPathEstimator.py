@@ -40,21 +40,21 @@ _FLOW_W, _FLOW_H = 160, 120
 _SAMPLE_STRIDE = 4
 
 _FLOW_CACHE_DIR = os.path.join(CURRENT_DIR, "flow_cache")
-_FLOW_CACHE_VERSION = "annulus_v2"
+_FLOW_CACHE_VERSION = "annulus_v4"
 _FEATURE_CACHE_DIR = os.path.join(CURRENT_DIR, "feature_cache")
 _FEATURE_CACHE_VERSION = "template_v1"
 
-_TURN_SIGNAL_MAX_WINDOW = 41
-_TURN_SIGNAL_DIVISOR = 20
-_TURN_THRESHOLD_PERCENTILE = 25.0
-_TURN_THRESHOLD_MULTIPLIER = 0.35
+_TURN_SIGNAL_MAX_WINDOW = 43
+_TURN_SIGNAL_DIVISOR = None
+_TURN_THRESHOLD_PERCENTILE = 12.0
+_TURN_THRESHOLD_MULTIPLIER = 0.40
 
 _PATH_SIGNAL_WINDOW = 41
-_PATH_THRESHOLD_PERCENTILE = 12.0
-_PATH_THRESHOLD_MULTIPLIER = 0.32
-_PATH_GAMMA_OUTBOUND = 0.26
-_PATH_GAMMA_INBOUND = 0.02
-_PATH_SMOOTH_WINDOW = 9
+_PATH_THRESHOLD_PERCENTILE = 22.0
+_PATH_THRESHOLD_MULTIPLIER = 0.41
+_PATH_GAMMA_OUTBOUND = 0.20
+_PATH_GAMMA_INBOUND = 0.005
+_PATH_SMOOTH_WINDOW = 15
 
 
 class MovementPathEstimator:
@@ -79,7 +79,7 @@ class MovementPathEstimator:
         self.calculated_movement_paths = {}
 
     def calculate_movement_path_and_turning_point(self, video_number, channel_length):
-        raw_flow = self._signed_flow_for_video(video_number)
+        raw_flow, flow_confidence = self._flow_signal_for_video(video_number)
 
         if raw_flow is None or len(raw_flow) < 2:
             return (
@@ -87,6 +87,8 @@ class MovementPathEstimator:
                 1.0,
                 np.array([0.0, 1.0, -1.0]),
             )
+
+        gated_flow = self._apply_confidence_gating(raw_flow, flow_confidence)
 
         turn_signal, turn_threshold = self._stabilize_flow_signal(
             raw_flow,
@@ -97,7 +99,7 @@ class MovementPathEstimator:
         turn = int(self._estimate_turning_point(turn_signal, turn_threshold))
 
         path_signal, path_threshold = self._stabilize_flow_signal(
-            raw_flow,
+            gated_flow,
             window=self._window_from_length(len(raw_flow), None, _PATH_SIGNAL_WINDOW),
             percentile=_PATH_THRESHOLD_PERCENTILE,
             threshold_multiplier=_PATH_THRESHOLD_MULTIPLIER,
@@ -129,12 +131,13 @@ class MovementPathEstimator:
             window = max(3, window - 1)
         return window
 
-    def _signed_flow_for_video(self, video_number):
+    def _flow_signal_for_video(self, video_number):
         os.makedirs(_FLOW_CACHE_DIR, exist_ok=True)
-        cache_file = os.path.join(_FLOW_CACHE_DIR, f"{_FLOW_CACHE_VERSION}_video_{video_number}.npy")
+        cache_file = os.path.join(_FLOW_CACHE_DIR, f"{_FLOW_CACHE_VERSION}_video_{video_number}.npz")
         if os.path.exists(cache_file):
             print(f"  [video {video_number}] loading cached flow")
-            return np.load(cache_file)
+            cached = np.load(cache_file)
+            return cached["flow"], cached["confidence"]
 
         frame_dir = os.path.join(self.path_to_videos, str(video_number))
         if os.path.exists(frame_dir) and any(name.endswith(".png") for name in os.listdir(frame_dir)):
@@ -145,11 +148,16 @@ class MovementPathEstimator:
                 result = self._flow_from_mp4(video_path, video_number)
             else:
                 print(f"  [video {video_number}] no source found in frame_images/, data/, or Videos/ - skipping")
-                return None
+                return None, None
 
         if result is not None:
-            np.save(cache_file, result)
+            flow_values, confidence_values = result
+            np.savez_compressed(cache_file, flow=flow_values, confidence=confidence_values)
         return result
+
+    def _signed_flow_for_video(self, video_number):
+        flow_values, _ = self._flow_signal_for_video(video_number)
+        return flow_values
 
     def _resolve_video_path(self, video_number):
         video_name = _VIDEOS.get(video_number)
@@ -169,6 +177,7 @@ class MovementPathEstimator:
         dx, dy = x - cx, y - cy
         r = np.sqrt(dx ** 2 + dy ** 2) + 1e-6
         rdx, rdy = dx / r, dy / r
+        tdx, tdy = -rdy, rdx
 
         radius = min(h, w) / 2.0
         inner = 0.18 * radius
@@ -182,55 +191,132 @@ class MovementPathEstimator:
         weight[int(h * 0.72):, :] = 0.0
         weight[:int(h * 0.16), :int(w * 0.24)] = 0.0
         weight[:int(h * 0.12), int(w * 0.76):] = 0.0
-        return rdx, rdy, weight
+        return rdx, rdy, tdx, tdy, weight
 
     def _prepare_gray_frame(self, gray_frame):
         resized = cv2.resize(gray_frame, (_FLOW_W, _FLOW_H))
         equalized = self._clahe.apply(resized)
         return cv2.GaussianBlur(equalized, (3, 3), 0)
 
-    def _estimate_signed_radial_flow(self, prev, curr, rdx, rdy, base_weight):
+    def _estimate_signed_radial_flow(self, prev, curr, rdx, rdy, tdx, tdy, base_weight):
+        base_valid = base_weight > 0.0
+        non_black = (prev > 10) & (curr > 10)
+        non_black = cv2.erode(non_black.astype(np.uint8), np.ones((3, 3), dtype=np.uint8), iterations=1).astype(bool)
+        dynamic_valid = base_valid & non_black
+        if np.count_nonzero(dynamic_valid) < 64:
+            return 0.0, 0.0
+
         flow = self._dis.calc(prev, curr, None)
-        valid = base_weight > 0.0
 
         flow_x = flow[..., 0]
         flow_y = flow[..., 1]
-        mean_x = np.average(flow_x[valid], weights=base_weight[valid])
-        mean_y = np.average(flow_y[valid], weights=base_weight[valid])
+        mean_x = np.average(flow_x[dynamic_valid], weights=base_weight[dynamic_valid])
+        mean_y = np.average(flow_y[dynamic_valid], weights=base_weight[dynamic_valid])
         flow_x = flow_x - mean_x
         flow_y = flow_y - mean_y
 
         radial = flow_x * rdx + flow_y * rdy
+        tangential = flow_x * tdx + flow_y * tdy
 
         grad_x = cv2.Sobel(prev, cv2.CV_32F, 1, 0, ksize=3)
         grad_y = cv2.Sobel(prev, cv2.CV_32F, 0, 1, ksize=3)
-        gradient = cv2.magnitude(grad_x, grad_y)
-        texture_weight = gradient * base_weight
+        gradient_prev = cv2.magnitude(grad_x, grad_y)
+        grad_x_curr = cv2.Sobel(curr, cv2.CV_32F, 1, 0, ksize=3)
+        grad_y_curr = cv2.Sobel(curr, cv2.CV_32F, 0, 1, ksize=3)
+        gradient_curr = cv2.magnitude(grad_x_curr, grad_y_curr)
+        gradient = np.minimum(gradient_prev, gradient_curr)
 
-        gradient_values = texture_weight[valid]
-        if gradient_values.size == 0:
-            return 0.0
+        diff = np.abs(curr.astype(np.float32) - prev.astype(np.float32))
+        diff_scale = max(float(np.percentile(diff[dynamic_valid], 75)), 6.0)
+        temporal_weight = np.exp(-np.square(diff / diff_scale))
 
-        gradient_threshold = np.percentile(gradient_values, 65)
-        textured = texture_weight >= gradient_threshold
-        if not np.any(textured):
-            textured = valid
+        texture_weight = gradient * base_weight * temporal_weight
+        gradient_values = texture_weight[dynamic_valid]
+        if gradient_values.size == 0 or float(np.max(gradient_values)) <= 1e-6:
+            return 0.0, 0.0
 
-        values = radial[textured]
-        weights = texture_weight[textured]
+        gradient_threshold = np.percentile(gradient_values, 60)
+        textured = dynamic_valid & (texture_weight >= gradient_threshold)
+        if np.count_nonzero(textured) < 64:
+            textured = dynamic_valid & (texture_weight > 0.0)
+            if np.count_nonzero(textured) < 64:
+                return 0.0, 0.0
+
+        flow_mag = np.sqrt(flow_x ** 2 + flow_y ** 2)
+        motion_cap = np.percentile(flow_mag[textured], 92)
+        filtered = textured & (flow_mag <= motion_cap)
+        if np.count_nonzero(filtered) < 64:
+            filtered = textured
+
+        values = radial[filtered]
+        tangential_values = tangential[filtered]
+        weights = texture_weight[filtered]
         if values.size == 0:
-            return 0.0
+            return 0.0, 0.0
 
         lo, hi = np.percentile(values, [10, 90])
         trimmed = (values >= lo) & (values <= hi)
         if np.any(trimmed):
             values = values[trimmed]
+            tangential_values = tangential_values[trimmed]
             weights = weights[trimmed]
 
         weight_sum = float(np.sum(weights))
         if weight_sum <= 1e-6:
-            return float(np.mean(values))
-        return float(np.sum(values * weights) / weight_sum)
+            signed_flow = float(np.mean(values))
+            radial_strength = float(np.mean(np.abs(values)))
+            tangential_strength = float(np.mean(np.abs(tangential_values)))
+        else:
+            signed_flow = float(np.sum(values * weights) / weight_sum)
+            radial_strength = float(np.sum(np.abs(values) * weights) / weight_sum)
+            tangential_strength = float(np.sum(np.abs(tangential_values) * weights) / weight_sum)
+
+        sign_coherence = abs(signed_flow) / (radial_strength + 1e-6)
+        axis_ratio = radial_strength / (radial_strength + tangential_strength + 1e-6)
+        coverage = np.count_nonzero(filtered) / max(np.count_nonzero(base_valid), 1)
+        stability = float(np.mean(temporal_weight[filtered]))
+        confidence = np.clip(
+            (coverage ** 0.6)
+            * (0.25 + 0.75 * sign_coherence)
+            * (0.25 + 0.75 * axis_ratio)
+            * (0.35 + 0.65 * stability),
+            0.0,
+            1.0,
+        )
+        return signed_flow, float(confidence)
+
+    def _apply_confidence_gating(self, raw_flow, confidence):
+        raw_flow = np.asarray(raw_flow, dtype=float)
+        confidence = np.asarray(confidence, dtype=float)
+        if raw_flow.size < 5 or confidence.shape != raw_flow.shape:
+            return raw_flow
+
+        confidence = np.clip(confidence, 0.0, 1.0)
+        if float(np.max(confidence)) <= 1e-6:
+            return raw_flow
+
+        x = np.arange(raw_flow.size, dtype=float)
+        spike_threshold = max(0.08, float(np.percentile(confidence, 10)))
+        anchor_threshold = max(0.20, float(np.percentile(confidence, 45)))
+        anchors = confidence >= anchor_threshold
+        if np.count_nonzero(anchors) < 3:
+            return raw_flow
+
+        interpolated = np.interp(x, x[anchors], raw_flow[anchors])
+        local_trend = uniform_filter1d(
+            interpolated,
+            size=self._window_from_length(len(raw_flow), 30, 7),
+            mode="nearest",
+        )
+        residual = np.abs(raw_flow - local_trend)
+        residual_threshold = max(float(np.percentile(residual, 90)), float(np.median(residual)) * 4.0 + 1e-6)
+        hard_replace = (confidence < spike_threshold) & (residual > residual_threshold)
+        if not np.any(hard_replace):
+            return raw_flow
+
+        gated = raw_flow.copy()
+        gated[hard_replace] = interpolated[hard_replace]
+        return gated
 
     def _stabilize_flow_signal(self, raw_flow, window, percentile, threshold_multiplier):
         smoothed = uniform_filter1d(raw_flow.astype(float), size=window)
@@ -356,7 +442,7 @@ class MovementPathEstimator:
 
     def _frame_feature(self, gray_frame):
         prepared = self._prepare_gray_frame(gray_frame)
-        _, _, annulus_weight = self._radial_weight_map(_FLOW_H, _FLOW_W)
+        _, _, _, _, annulus_weight = self._radial_weight_map(_FLOW_H, _FLOW_W)
         masked = prepared.astype(np.float32) * annulus_weight
 
         roi = masked[int(_FLOW_H * 0.08):int(_FLOW_H * 0.72), int(_FLOW_W * 0.12):int(_FLOW_W * 0.88)]
@@ -536,8 +622,9 @@ class MovementPathEstimator:
             return None
 
         prev = self._prepare_gray_frame(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
-        rdx, rdy, weight = self._radial_weight_map(_FLOW_H, _FLOW_W)
+        rdx, rdy, tdx, tdy, weight = self._radial_weight_map(_FLOW_H, _FLOW_W)
         flow_values = []
+        confidence_values = []
         idx = first_kept + 1
 
         while True:
@@ -548,12 +635,16 @@ class MovementPathEstimator:
                 break
 
             curr = self._prepare_gray_frame(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
-            flow_values.append(self._estimate_signed_radial_flow(prev, curr, rdx, rdy, weight))
+            flow_value, confidence_value = self._estimate_signed_radial_flow(prev, curr, rdx, rdy, tdx, tdy, weight)
+            flow_values.append(flow_value)
+            confidence_values.append(confidence_value)
             prev = curr
             idx += 1
 
         cap.release()
-        return np.asarray(flow_values, dtype=float) if flow_values else None
+        if not flow_values:
+            return None
+        return np.asarray(flow_values, dtype=float), np.asarray(confidence_values, dtype=float)
 
     def _flow_from_images(self, frame_dir):
         files = sorted(
@@ -568,8 +659,9 @@ class MovementPathEstimator:
             return None
 
         prev = self._prepare_gray_frame(first_img)
-        rdx, rdy, weight = self._radial_weight_map(_FLOW_H, _FLOW_W)
+        rdx, rdy, tdx, tdy, weight = self._radial_weight_map(_FLOW_H, _FLOW_W)
         flow_values = []
+        confidence_values = []
 
         for file_name in files[1:]:
             image = cv2.imread(os.path.join(frame_dir, file_name), cv2.IMREAD_GRAYSCALE)
@@ -577,10 +669,14 @@ class MovementPathEstimator:
                 continue
 
             curr = self._prepare_gray_frame(image)
-            flow_values.append(self._estimate_signed_radial_flow(prev, curr, rdx, rdy, weight))
+            flow_value, confidence_value = self._estimate_signed_radial_flow(prev, curr, rdx, rdy, tdx, tdy, weight)
+            flow_values.append(flow_value)
+            confidence_values.append(confidence_value)
             prev = curr
 
-        return np.asarray(flow_values, dtype=float) if flow_values else None
+        if not flow_values:
+            return None
+        return np.asarray(flow_values, dtype=float), np.asarray(confidence_values, dtype=float)
 
     def execute_estimations(self):
         if self.test_all_videos:
