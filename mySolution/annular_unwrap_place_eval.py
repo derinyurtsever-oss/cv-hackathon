@@ -3,7 +3,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .localization_model import feature_cache_dir, project_root
+try:
+    from .localization_model import feature_cache_dir, project_root
+except ImportError:
+    from localization_model import feature_cache_dir, project_root
 
 
 ANNULAR_VERSION = "annular-unwrap-fft-seams-v2"

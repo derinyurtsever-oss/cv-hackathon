@@ -1,10 +1,16 @@
 import numpy as np
+import joblib
 from scipy.ndimage import gaussian_filter1d
 from sklearn.isotonic import IsotonicRegression
 
-from .annular_unwrap_place_eval import extract_annular_features
-from .localization_model import extract_video_features, project_root
-from .place_recognition_direction_test import _sequence_place_predict
+try:
+    from .annular_unwrap_place_eval import extract_annular_features
+    from .localization_model import extract_video_features, project_root
+    from .place_recognition_direction_test import _sequence_place_predict
+except ImportError:
+    from annular_unwrap_place_eval import extract_annular_features
+    from localization_model import extract_video_features, project_root
+    from place_recognition_direction_test import _sequence_place_predict
 
 
 BASE_ANNULAR_DIM = 1258
@@ -23,7 +29,10 @@ def _available_label_videos() -> tuple[int, ...]:
 
 
 def _aligned_labels(video: int, frame_numbers: np.ndarray) -> np.ndarray | None:
-    from .localization_model import aligned_labels
+    try:
+        from .localization_model import aligned_labels
+    except ImportError:
+        from localization_model import aligned_labels
 
     return aligned_labels(video, frame_numbers)
 
@@ -65,10 +74,17 @@ def _hybrid_features(video: int, mode: str):
 
 
 def _reference_library(mode: str):
+    cache_path = project_root() / "mySolution" / "results" / f"runtime_ref_library_{mode}_v1.joblib"
+    videos = _available_label_videos()
+    if cache_path.exists():
+        payload = joblib.load(cache_path)
+        if payload.get("mode") == mode and tuple(payload.get("videos", ())) == tuple(videos):
+            return payload["refs"], float(payload["turn_frac"])
+
     channel_lengths = np.load(project_root() / "channel_lengths.npy")
     refs = []
     turn_fracs = []
-    for video in _available_label_videos():
+    for video in videos:
         frame_numbers, features = _hybrid_features(video, mode)
         labels = _aligned_labels(video, frame_numbers)
         if labels is None:
@@ -83,7 +99,18 @@ def _reference_library(mode: str):
         refs.append((features[ret_rev], norm_labels[ret_rev], _pool_descriptor(features[ret_rev])))
     if not refs:
         raise RuntimeError(f"No reference videos available for mode {mode}.")
-    return refs, float(np.median(turn_fracs))
+    turn_frac = float(np.median(turn_fracs))
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(
+        {
+            "mode": mode,
+            "videos": tuple(videos),
+            "turn_frac": turn_frac,
+            "refs": refs,
+        },
+        cache_path,
+    )
+    return refs, turn_frac
 
 
 def _get_library():

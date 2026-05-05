@@ -135,6 +135,29 @@ uv run python compare_estimators.py
 | Path MAE [m] | lower is better | Mean absolute position error, normalized by channel length |
 | Dir accuracy | higher is better | Fraction of frames with correct movement direction |
 
+## Simple local run
+
+For the submitted solution, you can also use the repo-root entrypoint:
+
+```bash
+python main.py
+```
+
+Useful variants:
+
+```bash
+python main.py --video 10
+python main.py --no-score
+```
+
+This expects the usual repository data layout next to `main.py`:
+
+- `frame_images/`
+- `channel_lengths.npy`
+- `distance_labels/` if scoring/training labels are available
+
+Run `main.py` from the repository root.
+
 ---
 
 ## Using `distance_labels/` as training data
