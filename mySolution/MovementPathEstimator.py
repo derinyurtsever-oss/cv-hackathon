@@ -34,27 +34,22 @@ _FIRST_KEPT_FRAME = {
 
 _LAST_KEPT_FRAME = {8: 1600}
 
-_LABELED_VIDEOS = [1, 2, 3, 4, 8, 9, 10, 11]
-
 _FLOW_W, _FLOW_H = 160, 120
-_SAMPLE_STRIDE = 4
 
 _FLOW_CACHE_DIR = os.path.join(CURRENT_DIR, "flow_cache")
 _FLOW_CACHE_VERSION = "annulus_v4"
-_FEATURE_CACHE_DIR = os.path.join(CURRENT_DIR, "feature_cache")
-_FEATURE_CACHE_VERSION = "template_v1"
 
-_TURN_SIGNAL_MAX_WINDOW = 43
+_TURN_SIGNAL_MAX_WINDOW = 47
 _TURN_SIGNAL_DIVISOR = None
-_TURN_THRESHOLD_PERCENTILE = 12.0
-_TURN_THRESHOLD_MULTIPLIER = 0.40
+_TURN_THRESHOLD_PERCENTILE = 10.0
+_TURN_THRESHOLD_MULTIPLIER = 0.30
 
 _PATH_SIGNAL_WINDOW = 41
-_PATH_THRESHOLD_PERCENTILE = 22.0
-_PATH_THRESHOLD_MULTIPLIER = 0.41
-_PATH_GAMMA_OUTBOUND = 0.20
-_PATH_GAMMA_INBOUND = 0.005
-_PATH_SMOOTH_WINDOW = 15
+_PATH_THRESHOLD_PERCENTILE = 26.0
+_PATH_THRESHOLD_MULTIPLIER = 0.35
+_PATH_GAMMA_OUTBOUND = 0.18
+_PATH_GAMMA_INBOUND = 0.002
+_PATH_SMOOTH_WINDOW = 17
 
 
 class MovementPathEstimator:
@@ -65,7 +60,6 @@ class MovementPathEstimator:
         self.video_num_to_test = video_num_to_test
 
         self.path_to_videos = os.path.join(PROJECT_ROOT, "frame_images")
-        self.current_folder = CURRENT_DIR + os.sep
         self.video_search_dirs = [
             os.path.join(PROJECT_ROOT, "data"),
             os.path.join(PROJECT_ROOT, "Videos"),
@@ -131,6 +125,15 @@ class MovementPathEstimator:
             window = max(3, window - 1)
         return window
 
+    @staticmethod
+    def _frame_image_files(frame_dir):
+        if not os.path.isdir(frame_dir):
+            return []
+
+        files = [name for name in os.listdir(frame_dir) if name.endswith(".png")]
+        files.sort(key=lambda name: int(os.path.splitext(name)[0]))
+        return files
+
     def _flow_signal_for_video(self, video_number):
         os.makedirs(_FLOW_CACHE_DIR, exist_ok=True)
         cache_file = os.path.join(_FLOW_CACHE_DIR, f"{_FLOW_CACHE_VERSION}_video_{video_number}.npz")
@@ -140,7 +143,8 @@ class MovementPathEstimator:
             return cached["flow"], cached["confidence"]
 
         frame_dir = os.path.join(self.path_to_videos, str(video_number))
-        if os.path.exists(frame_dir) and any(name.endswith(".png") for name in os.listdir(frame_dir)):
+        frame_files = self._frame_image_files(frame_dir)
+        if frame_files:
             result = self._flow_from_images(frame_dir)
         else:
             video_path = self._resolve_video_path(video_number)
@@ -154,10 +158,6 @@ class MovementPathEstimator:
             flow_values, confidence_values = result
             np.savez_compressed(cache_file, flow=flow_values, confidence=confidence_values)
         return result
-
-    def _signed_flow_for_video(self, video_number):
-        flow_values, _ = self._flow_signal_for_video(video_number)
-        return flow_values
 
     def _resolve_video_path(self, video_number):
         video_name = _VIDEOS.get(video_number)
@@ -419,190 +419,6 @@ class MovementPathEstimator:
         direction[start:stop] = 0.0
         return direction
 
-    def _video_frame_files(self, video_number):
-        frame_dir = os.path.join(self.path_to_videos, str(video_number))
-        if not os.path.isdir(frame_dir):
-            return None
-
-        files = [name for name in os.listdir(frame_dir) if name.endswith(".png")]
-        if not files:
-            return None
-
-        files.sort(key=lambda name: int(os.path.splitext(name)[0]))
-        return frame_dir, files
-
-    def _build_sample_indices(self, num_frames):
-        if num_frames <= 1:
-            return np.array([0], dtype=int)
-
-        indices = np.arange(0, num_frames, _SAMPLE_STRIDE, dtype=int)
-        if indices[-1] != num_frames - 1:
-            indices = np.append(indices, num_frames - 1)
-        return indices
-
-    def _frame_feature(self, gray_frame):
-        prepared = self._prepare_gray_frame(gray_frame)
-        _, _, _, _, annulus_weight = self._radial_weight_map(_FLOW_H, _FLOW_W)
-        masked = prepared.astype(np.float32) * annulus_weight
-
-        roi = masked[int(_FLOW_H * 0.08):int(_FLOW_H * 0.72), int(_FLOW_W * 0.12):int(_FLOW_W * 0.88)]
-        small = cv2.resize(roi, (16, 12), interpolation=cv2.INTER_AREA).astype(np.float32)
-        grad_x = cv2.Sobel(small, cv2.CV_32F, 1, 0, ksize=3)
-        grad_y = cv2.Sobel(small, cv2.CV_32F, 0, 1, ksize=3)
-        col_profile = np.mean(small, axis=0)
-        row_profile = np.mean(small, axis=1)
-
-        feature = np.concatenate([small.ravel(), grad_x.ravel(), grad_y.ravel(), col_profile, row_profile])
-        feature = (feature - np.mean(feature)) / (np.std(feature) + 1e-6)
-        return feature.astype(np.float32)
-
-    def _load_or_compute_feature_bank(self, video_number):
-        os.makedirs(_FEATURE_CACHE_DIR, exist_ok=True)
-        cache_path = os.path.join(_FEATURE_CACHE_DIR, f"{_FEATURE_CACHE_VERSION}_video_{video_number}.npz")
-        if os.path.exists(cache_path):
-            cached = np.load(cache_path)
-            return {
-                "sample_indices": cached["sample_indices"],
-                "features": cached["features"],
-                "num_frames": int(cached["num_frames"][0]),
-                "label_len": int(cached["label_len"][0]),
-                "progress": cached["progress"],
-                "valid_progress": cached["valid_progress"].astype(bool),
-            }
-
-        frame_info = self._video_frame_files(video_number)
-        if frame_info is None:
-            return None
-        frame_dir, files = frame_info
-
-        sample_indices = self._build_sample_indices(len(files))
-        features = []
-        for index in sample_indices:
-            image = cv2.imread(os.path.join(frame_dir, files[index]), cv2.IMREAD_GRAYSCALE)
-            if image is None:
-                features.append(np.zeros(632, dtype=np.float32))
-            else:
-                features.append(self._frame_feature(image))
-        features = np.stack(features)
-
-        label_path = os.path.join(PROJECT_ROOT, "distance_labels", f"{video_number}.npy")
-        progress = np.full(sample_indices.shape[0], np.nan, dtype=np.float32)
-        valid_progress = np.zeros(sample_indices.shape[0], dtype=bool)
-        label_len = 0
-        if os.path.exists(label_path):
-            labels = np.load(label_path)
-            label_len = int(len(labels))
-            valid_progress = sample_indices < label_len
-            if np.any(valid_progress):
-                progress[valid_progress] = np.clip(
-                    labels[sample_indices[valid_progress]] / max(self.channel_lengths[video_number - 1], 1e-6),
-                    0.0,
-                    1.0,
-                ).astype(np.float32)
-
-        np.savez_compressed(
-            cache_path,
-            sample_indices=sample_indices,
-            features=features,
-            num_frames=np.array([len(files)], dtype=np.int32),
-            label_len=np.array([label_len], dtype=np.int32),
-            progress=progress,
-            valid_progress=valid_progress.astype(np.uint8),
-        )
-        return {
-            "sample_indices": sample_indices,
-            "features": features,
-            "num_frames": len(files),
-            "label_len": label_len,
-            "progress": progress,
-            "valid_progress": valid_progress,
-        }
-
-    def _video_summary(self, features):
-        if features.shape[0] == 0:
-            return None
-        positions = np.linspace(0, features.shape[0] - 1, 5, dtype=int)
-        summary = features[positions].reshape(-1)
-        norm = np.linalg.norm(summary) + 1e-6
-        return summary / norm
-
-    def _cosine_similarity(self, a, b):
-        if a is None or b is None:
-            return -1.0
-        return float(np.dot(a, b) / ((np.linalg.norm(a) + 1e-6) * (np.linalg.norm(b) + 1e-6)))
-
-    def _template_transfer_path(self, video_number, channel_length, full_length):
-        target_bank = self._load_or_compute_feature_bank(video_number)
-        if target_bank is None or target_bank["features"].shape[0] < 5:
-            return None, None
-
-        target_features = target_bank["features"].astype(np.float32)
-        target_norm = target_features / (np.linalg.norm(target_features, axis=1, keepdims=True) + 1e-6)
-        target_summary = self._video_summary(target_features)
-
-        reference_sets = []
-        for ref_video in _LABELED_VIDEOS:
-            if ref_video == video_number:
-                continue
-
-            ref_bank = self._load_or_compute_feature_bank(ref_video)
-            if ref_bank is None:
-                continue
-
-            valid_mask = ref_bank["valid_progress"]
-            if not np.any(valid_mask):
-                continue
-
-            ref_features = ref_bank["features"][valid_mask].astype(np.float32)
-            ref_progress = ref_bank["progress"][valid_mask].astype(np.float32)
-            ref_norm = ref_features / (np.linalg.norm(ref_features, axis=1, keepdims=True) + 1e-6)
-
-            ref_summary = self._video_summary(ref_features)
-            similarity = self._cosine_similarity(target_summary, ref_summary)
-            length_similarity = np.exp(
-                -abs(self.channel_lengths[ref_video - 1] - channel_length) / max(channel_length, 1e-6)
-            )
-            score = 0.75 * similarity + 0.25 * float(length_similarity)
-            reference_sets.append((score, ref_norm, ref_progress))
-
-        if not reference_sets:
-            return None, None
-
-        reference_sets.sort(key=lambda item: item[0], reverse=True)
-        selected = reference_sets[:4]
-
-        ref_features = np.concatenate([item[1] for item in selected], axis=0)
-        ref_progress = np.concatenate([item[2] for item in selected], axis=0)
-        ref_video_weights = np.concatenate([
-            np.full(item[1].shape[0], max(item[0], 0.05), dtype=np.float32) for item in selected
-        ])
-
-        predictions = []
-        k = min(11, ref_features.shape[0])
-        for feature in target_norm:
-            distances = np.sum((ref_features - feature) ** 2, axis=1)
-            nearest = np.argpartition(distances, k - 1)[:k]
-            weights = ref_video_weights[nearest] / (distances[nearest] + 1e-6)
-            predictions.append(float(np.sum(weights * ref_progress[nearest]) / np.sum(weights)))
-
-        progress = np.clip(np.asarray(predictions, dtype=np.float32), 0.0, 1.0)
-        smooth_window = max(5, min(21, len(progress) // 25))
-        if smooth_window % 2 == 0:
-            smooth_window += 1
-        progress = uniform_filter1d(progress, size=smooth_window, mode="nearest")
-
-        template_turn_sample = int(np.argmax(progress))
-        template_path_sampled = self._enforce_unimodal(progress * channel_length, template_turn_sample, channel_length)
-
-        template_path = np.interp(
-            np.arange(full_length, dtype=np.float32),
-            target_bank["sample_indices"].astype(np.float32),
-            template_path_sampled.astype(np.float32),
-        ).astype(np.float32)
-        template_turn = int(target_bank["sample_indices"][template_turn_sample])
-        template_path = self._enforce_unimodal(template_path, template_turn, channel_length)
-        return template_path, template_turn
-
     def _flow_from_mp4(self, video_path, video_number):
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
@@ -647,10 +463,7 @@ class MovementPathEstimator:
         return np.asarray(flow_values, dtype=float), np.asarray(confidence_values, dtype=float)
 
     def _flow_from_images(self, frame_dir):
-        files = sorted(
-            [name for name in os.listdir(frame_dir) if name.endswith(".png")],
-            key=lambda name: int(os.path.splitext(name)[0]),
-        )
+        files = self._frame_image_files(frame_dir)
         if len(files) < 2:
             return None
 
@@ -683,7 +496,7 @@ class MovementPathEstimator:
             available = []
             for video_number in range(1, 12):
                 frame_dir = os.path.join(self.path_to_videos, str(video_number))
-                has_frames = os.path.exists(frame_dir) and any(name.endswith(".png") for name in os.listdir(frame_dir))
+                has_frames = bool(self._frame_image_files(frame_dir))
                 if self._resolve_video_path(video_number) is not None or has_frames:
                     available.append(video_number)
             for video_number in available:
