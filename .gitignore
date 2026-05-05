@@ -1,6 +1,31 @@
-frame_images*
-*videos*
-frame_images.zip
-.idea
+# Python
+__pycache__/
 *__pycache__*
+*.pyc
+*.pyo
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Data and generated outputs
+data/
+outputs/
+output/
+logs/
+checkpoints/
+frame_images*
+frame_images.zip
+*videos*
+
+# Job outputs
+*.out
+*.err
+euler_test_output.txt
+
+# OS / editor
+.DS_Store
+.idea
+.vscode/
+
+# Binaries
 *.exe
