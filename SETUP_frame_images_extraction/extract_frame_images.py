@@ -22,7 +22,7 @@ FFMPEG_LINUX_URLS  = {
     "aarch64": "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz",
 }
 
-VIDEOS_DIR = Path(__file__).parent.parent / "videos"
+VIDEOS_DIR = Path(__file__).parent.parent / "data"
 OUT_DIR = Path(__file__).parent.parent / "frame_images"
 
 VIDEOS = {

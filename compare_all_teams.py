@@ -24,6 +24,9 @@ import numpy as np
 from EstimationRater import EstimationRater
 from MovementPath import MovementPath
 
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+os.chdir(PROJECT_ROOT)
+
 # ── config ─────────────────────────────────────────────────────────────
 
 SKIP_FOLDERS = {'mySolution', 'Template', '__pycache__'}
