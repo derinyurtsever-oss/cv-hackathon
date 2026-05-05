@@ -29,3 +29,4 @@ euler_test_output.txt
 
 # Binaries
 *.exe
+SETUP_frame_images_extraction/ffmpeg
