@@ -1,5 +1,15 @@
 # Sewer Probe Distance Estimation — Documentation
 
+> **To view the interactive 3D simulation and pipeline presentation, run:**
+> ```bash
+> python generate_viz.py [video_number]   # default: 4
+> ```
+> This generates `visualization_v<n>.html` — open it in any browser.  
+> The HTML contains a full 3D pipe walkthrough with a live distance chart and a
+> numbered slide panel that walks through every step of the implementation.
+
+---
+
 ## Overview
 
 This project estimates how far a sewer-inspection probe has travelled inside a pipe channel, using only the video recorded by the probe's on-board camera.
