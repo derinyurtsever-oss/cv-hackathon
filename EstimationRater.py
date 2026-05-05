@@ -1,8 +1,11 @@
 import math
+import os
 import numpy as np
 import matplotlib.pyplot as plt
 
 from MovementPath import MovementPath
+
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 class EstimationRater:
 
@@ -15,22 +18,26 @@ class EstimationRater:
         self.video_num = video_num
         self.num_videos = 11
 
-        self.channel_length = np.load("channel_lengths.npy")
+        self.channel_length = np.load(os.path.join(PROJECT_ROOT, "channel_lengths.npy"))
 
         # to be calculated
         self.turning_point_scores = []
         self.movement_path_scores = []
+        self.movement_direction_scores = []
 
     def rate(self):
         if self.video_num > 0 and 0 in self.measured_movement_paths:
             self.turning_point_scores.append(self.calc_turning_point_score(0))
             self.movement_path_scores.append(self.calc_mean_absolute_diff_movement_path(0))
+            self.movement_direction_scores.append(self.calc_direction_accuracy(0))
             if self.do_print:
                 print('Estimator: ' + self.estimator_name + ', Video: ' + str(self.video_num) + ', Measured turning point: ',
                       self.measured_movement_paths[0].turning_point, ', estimated turning point: ',
                       self.estimated_movement_paths[0].turning_point, ", absolute error [Frames]: ", self.turning_point_scores[0])
                 print('Estimator: ' + self.estimator_name + ', Video: ' + str(
                     self.video_num) + " Mean absolute error of the movement path [m]: ", self.movement_path_scores[0])
+                print('Estimator: ' + self.estimator_name + ', Video: ' + str(
+                    self.video_num) + " Direction accuracy: ", self.movement_direction_scores[0])
             if self.do_plot: # plot movement path
                 plt.plot(self.estimated_movement_paths[0].movement_path, label='estimated')
                 plt.plot(self.measured_movement_paths[0].movement_path, label='measured')
@@ -53,6 +60,7 @@ class EstimationRater:
                 if index + 1 in self.estimated_movement_paths and index + 1 in self.measured_movement_paths:
                     self.turning_point_scores.append(self.calc_turning_point_score(index + 1))
                     self.movement_path_scores.append(self.calc_mean_absolute_diff_movement_path(index + 1))
+                    self.movement_direction_scores.append(self.calc_direction_accuracy(index + 1))
             if self.do_print:
                 self.print_scores()
             if self.do_plot:
@@ -63,11 +71,16 @@ class EstimationRater:
             #     self.plot_directions()
 
     def calc_turning_point_score(self, ind):
-        print("ind: ", ind, self.estimated_movement_paths[ind].turning_point, self.measured_movement_paths[ind].turning_point)
         return abs(self.estimated_movement_paths[ind].turning_point - self.measured_movement_paths[ind].turning_point)
     def calc_mean_absolute_diff_movement_path(self, ind):
         return self.mean_absolute_difference(self.estimated_movement_paths[ind].movement_path,
                                     self.measured_movement_paths[ind].movement_path)
+
+    def calc_direction_accuracy(self, ind):
+        return self.direction_accuracy(
+            self.estimated_movement_paths[ind].movement_direction,
+            self.measured_movement_paths[ind].movement_direction,
+        )
 
 
     def print_scores(self):
@@ -88,11 +101,15 @@ class EstimationRater:
                       estimated_movement_path.turning_point, ", absolute error [Frames]: ", turning_point_score)
                 print('Estimator: ' + self.estimator_name + ', Video: ' + str(
                     video_num) + " Mean absolute error of the movement path [m]: ", movement_path_score)
+                print('Estimator: ' + self.estimator_name + ', Video: ' + str(
+                    video_num) + " Direction accuracy: ", self.movement_direction_scores[score_index - 1])
         #avg_turning_point_score = sum(self.turning_point_scores) / len(self.turning_point_scores)
         avg_turning_point_score = np.average(np.array(self.turning_point_scores))
         avg_movement_path_score = np.average(np.array(self.movement_path_scores))
+        avg_movement_direction_score = np.average(np.array(self.movement_direction_scores))
         print('\n\n::::: Estimator: ', self.estimator_name, ", Absolute turning point error (average over all videos) [Frames]: ",
               avg_turning_point_score, ", Mean absolute error of the movement path (average over all videos) [m]: ", avg_movement_path_score,
+              ", Direction accuracy (average over all videos): ", avg_movement_direction_score,
      )
 
     def plot_movement_paths_old(self):
@@ -377,6 +394,21 @@ class EstimationRater:
         msd = np.mean(abs_diff)
 
         return msd
+
+    def direction_accuracy(self, estimated, measured):
+
+        # cut estimated if longer than measured
+        if len(estimated) > len(measured):
+            estimated = estimated[:len(measured)]
+
+        # add zeros if measured longer
+        if len(estimated) < len(measured):
+            length_diff = len(measured) - len(estimated)
+            estimated = np.pad(estimated, (0, length_diff), 'constant')
+
+        estimated = np.sign(np.asarray(estimated))
+        measured = np.sign(np.asarray(measured))
+        return np.mean(estimated == measured)
 
 
 

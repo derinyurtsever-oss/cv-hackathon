@@ -1,12 +1,18 @@
-import numpy as np
 import os
+import sys
+
 import cv2
+import numpy as np
 from scipy.ndimage import uniform_filter1d
+
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from MovementPath import MovementPath
 
 
-# Video filenames as used by the organizers' extraction script
 _VIDEOS = {
     1:  "20230810_081214_ERZZuerich_EnzTechnikAG_TestMeterzaehler_Test1.mp4",
     2:  "20230810_083027_ERZZuerich_EnzTechnikAG_TestMeterzaehler_Test2.mp4",
@@ -21,136 +27,495 @@ _VIDEOS = {
     11: "20230810_105533_ERZZuerich_EnzTechnikAG_TestMeterzaehler_Test11gleicherKanal.mp4",
 }
 
-# First frame index to keep per video (frames before this are trimmed)
 _FIRST_KEPT_FRAME = {
     1: 180, 2: 56, 3: 58, 4: 30, 5: 55, 6: 58,
     7: 330, 8: 100, 9: 35, 10: 42, 11: 314,
 }
 
-# Last frame index to keep per video (None = keep all)
 _LAST_KEPT_FRAME = {8: 1600}
 
-# Resize every frame to this resolution before computing optical flow (speed vs. accuracy)
-_FLOW_W, _FLOW_H = 160, 120
+_LABELED_VIDEOS = [1, 2, 3, 4, 8, 9, 10, 11]
 
-# Cache directory for computed flow arrays (avoids recomputing on every run)
-_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'flow_cache')
+_FLOW_W, _FLOW_H = 160, 120
+_SAMPLE_STRIDE = 4
+
+_FLOW_CACHE_DIR = os.path.join(CURRENT_DIR, "flow_cache")
+_FLOW_CACHE_VERSION = "annulus_v2"
+_FEATURE_CACHE_DIR = os.path.join(CURRENT_DIR, "feature_cache")
+_FEATURE_CACHE_VERSION = "template_v1"
+
+_TURN_SIGNAL_MAX_WINDOW = 41
+_TURN_SIGNAL_DIVISOR = 20
+_TURN_THRESHOLD_PERCENTILE = 25.0
+_TURN_THRESHOLD_MULTIPLIER = 0.35
+
+_PATH_SIGNAL_WINDOW = 41
+_PATH_THRESHOLD_PERCENTILE = 12.0
+_PATH_THRESHOLD_MULTIPLIER = 0.32
+_PATH_GAMMA_OUTBOUND = 0.26
+_PATH_GAMMA_INBOUND = 0.02
+_PATH_SMOOTH_WINDOW = 9
 
 
 class MovementPathEstimator:
 
     def __init__(self, video_num_to_test, test_all_videos):
-        self.channel_lengths = np.load('channel_lengths.npy')
+        self.channel_lengths = np.load(os.path.join(PROJECT_ROOT, "channel_lengths.npy"))
         self.test_all_videos = test_all_videos
         self.video_num_to_test = video_num_to_test
 
-        self.path_to_videos = 'frame_images/'
-        self.current_folder = os.path.dirname(os.path.abspath(__file__)) + os.sep
-        # data/ sits one level above mySolution/
-        self.data_dir = os.path.normpath(os.path.join(self.current_folder, '..', 'data'))
+        self.path_to_videos = os.path.join(PROJECT_ROOT, "frame_images")
+        self.current_folder = CURRENT_DIR + os.sep
+        self.video_search_dirs = [
+            os.path.join(PROJECT_ROOT, "data"),
+            os.path.join(PROJECT_ROOT, "Videos"),
+            os.path.join(PROJECT_ROOT, "videos"),
+        ]
 
-        # DIS flow: Dense Inverse Search — 3-5× faster than Farneback, similar accuracy
         self._dis = cv2.DISOpticalFlow_create(cv2.DISOpticalFlow_PRESET_FAST)
         self._dis.setUseSpatialPropagation(True)
+        self._clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
         self.calculated_movement_paths = {}
-
-    # ------------------------------------------------------------------ #
-    #  Core estimator                                                      #
-    # ------------------------------------------------------------------ #
 
     def calculate_movement_path_and_turning_point(self, video_number, channel_length):
         raw_flow = self._signed_flow_for_video(video_number)
 
         if raw_flow is None or len(raw_flow) < 2:
-            half = 1
             return (
                 np.array([0.0, channel_length, 0.0]),
                 1.0,
                 np.array([0.0, 1.0, -1.0]),
             )
 
-        # Smooth to suppress per-frame noise
-        window = max(5, min(51, len(raw_flow) // 20))
-        smoothed = uniform_filter1d(raw_flow.astype(float), size=window)
+        turn_signal, turn_threshold = self._stabilize_flow_signal(
+            raw_flow,
+            window=self._window_from_length(len(raw_flow), _TURN_SIGNAL_DIVISOR, _TURN_SIGNAL_MAX_WINDOW),
+            percentile=_TURN_THRESHOLD_PERCENTILE,
+            threshold_multiplier=_TURN_THRESHOLD_MULTIPLIER,
+        )
+        turn = int(self._estimate_turning_point(turn_signal, turn_threshold))
 
-        # Cumulative integral → raw position curve (index 0 = 0 m)
-        cum = np.concatenate([[0.0], np.cumsum(smoothed)])
+        path_signal, path_threshold = self._stabilize_flow_signal(
+            raw_flow,
+            window=self._window_from_length(len(raw_flow), None, _PATH_SIGNAL_WINDOW),
+            percentile=_PATH_THRESHOLD_PERCENTILE,
+            threshold_multiplier=_PATH_THRESHOLD_MULTIPLIER,
+        )
+        movement_path = self._integrate_path(
+            path_signal,
+            turn,
+            path_threshold,
+            channel_length,
+            gamma_outbound=_PATH_GAMMA_OUTBOUND,
+            gamma_inbound=_PATH_GAMMA_INBOUND,
+            smooth_window=self._window_from_length(len(raw_flow) + 1, None, _PATH_SMOOTH_WINDOW),
+        )
 
-        # Turning point = frame with maximum accumulated forward distance
-        tp = int(np.argmax(cum))
+        movement_direction = self._path_to_direction(movement_path, turn, channel_length)
+        return movement_path, float(turn), movement_direction
 
-        # Two-phase scaling: forward and return halves independently anchored
-        forward_total = cum[tp]
-        return_total  = cum[tp] - cum[-1]  # total backward flow magnitude after TP
-
-        fwd_scale = channel_length / forward_total if forward_total > 0.0 else 1.0
-        if return_total > 0.05 * forward_total:
-            # Cap the asymmetry ratio to [0.6, 1.67] to guard against water-flow bias
-            ret_total_capped = np.clip(return_total, 0.6 * forward_total, 1.67 * forward_total)
-            ret_scale = channel_length / ret_total_capped
+    @staticmethod
+    def _window_from_length(signal_length, divisor, max_window):
+        if signal_length <= 1:
+            return 1
+        if divisor is None:
+            window = max_window
         else:
-            ret_scale = fwd_scale
-
-        movement_path = np.empty(len(cum))
-        movement_path[:tp + 1] = cum[:tp + 1] * fwd_scale
-        movement_path[tp:] = channel_length - (cum[tp] - cum[tp:]) * ret_scale
-        movement_path = np.clip(movement_path, 0.0, channel_length)
-
-        # Enforce physical monotonicity: forward-only before TP, backward-only after
-        movement_path[:tp + 1] = np.maximum.accumulate(movement_path[:tp + 1])
-        movement_path[tp:] = np.minimum.accumulate(movement_path[tp:])
-
-        direction = np.concatenate([[0.0], np.sign(smoothed)])
-
-        return movement_path, float(tp), direction
-
-    # ------------------------------------------------------------------ #
-    #  Optical flow pipeline                                               #
-    # ------------------------------------------------------------------ #
+            window = max(5, signal_length // divisor)
+            window = min(window, max_window)
+        window = max(3, min(window, signal_length))
+        if window % 2 == 0:
+            window = max(3, window - 1)
+        return window
 
     def _signed_flow_for_video(self, video_number):
-        """Return a 1-D array of signed radial optical-flow values, one per frame transition."""
-        # Check cache first
-        os.makedirs(_CACHE_DIR, exist_ok=True)
-        cache_file = os.path.join(_CACHE_DIR, f'video_{video_number}.npy')
+        os.makedirs(_FLOW_CACHE_DIR, exist_ok=True)
+        cache_file = os.path.join(_FLOW_CACHE_DIR, f"{_FLOW_CACHE_VERSION}_video_{video_number}.npy")
         if os.path.exists(cache_file):
             print(f"  [video {video_number}] loading cached flow")
             return np.load(cache_file)
 
-        # Prefer pre-extracted frames (no decode overhead)
         frame_dir = os.path.join(self.path_to_videos, str(video_number))
-        if os.path.exists(frame_dir) and any(f.endswith('.png') for f in os.listdir(frame_dir)):
+        if os.path.exists(frame_dir) and any(name.endswith(".png") for name in os.listdir(frame_dir)):
             result = self._flow_from_images(frame_dir)
         else:
-            vid_name = _VIDEOS.get(video_number)
-            vid_path = os.path.join(self.data_dir, vid_name) if vid_name else None
-            if vid_path and os.path.exists(vid_path):
-                result = self._flow_from_mp4(vid_path, video_number)
+            video_path = self._resolve_video_path(video_number)
+            if video_path is not None:
+                result = self._flow_from_mp4(video_path, video_number)
             else:
-                print(f"  [video {video_number}] no source found in frame_images/ or data/ — skipping")
+                print(f"  [video {video_number}] no source found in frame_images/, data/, or Videos/ - skipping")
                 return None
 
         if result is not None:
             np.save(cache_file, result)
         return result
 
+    def _resolve_video_path(self, video_number):
+        video_name = _VIDEOS.get(video_number)
+        if not video_name:
+            return None
+
+        for directory in self.video_search_dirs:
+            candidate = os.path.join(directory, video_name)
+            if os.path.exists(candidate):
+                return candidate
+        return None
+
     @staticmethod
     def _radial_weight_map(h, w):
-        """
-        Per-pixel radial unit vectors and weights for an h×w frame.
-        Weight is 0 at the centre (often a dark void), rises linearly to 1
-        at the half-diagonal, then is clamped — so the pipe walls dominate.
-        """
         cx, cy = w / 2.0, h / 2.0
         y, x = np.mgrid[0:h, 0:w].astype(np.float32)
         dx, dy = x - cx, y - cy
         r = np.sqrt(dx ** 2 + dy ** 2) + 1e-6
         rdx, rdy = dx / r, dy / r
-        weight = np.clip(r / (min(h, w) / 2.0), 0.0, 1.0)
-        # Mask out bottom 30% — flowing water produces spurious optical flow
-        weight[int(h * 0.70):, :] = 0.0
+
+        radius = min(h, w) / 2.0
+        inner = 0.18 * radius
+        outer = 0.92 * radius
+        annulus = (r >= inner) & (r <= outer)
+
+        mid_radius = 0.58 * radius
+        spread = 0.22 * radius + 1e-6
+        weight = np.exp(-((r - mid_radius) ** 2) / (2.0 * spread ** 2)) * annulus.astype(np.float32)
+
+        weight[int(h * 0.72):, :] = 0.0
+        weight[:int(h * 0.16), :int(w * 0.24)] = 0.0
+        weight[:int(h * 0.12), int(w * 0.76):] = 0.0
         return rdx, rdy, weight
+
+    def _prepare_gray_frame(self, gray_frame):
+        resized = cv2.resize(gray_frame, (_FLOW_W, _FLOW_H))
+        equalized = self._clahe.apply(resized)
+        return cv2.GaussianBlur(equalized, (3, 3), 0)
+
+    def _estimate_signed_radial_flow(self, prev, curr, rdx, rdy, base_weight):
+        flow = self._dis.calc(prev, curr, None)
+        valid = base_weight > 0.0
+
+        flow_x = flow[..., 0]
+        flow_y = flow[..., 1]
+        mean_x = np.average(flow_x[valid], weights=base_weight[valid])
+        mean_y = np.average(flow_y[valid], weights=base_weight[valid])
+        flow_x = flow_x - mean_x
+        flow_y = flow_y - mean_y
+
+        radial = flow_x * rdx + flow_y * rdy
+
+        grad_x = cv2.Sobel(prev, cv2.CV_32F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(prev, cv2.CV_32F, 0, 1, ksize=3)
+        gradient = cv2.magnitude(grad_x, grad_y)
+        texture_weight = gradient * base_weight
+
+        gradient_values = texture_weight[valid]
+        if gradient_values.size == 0:
+            return 0.0
+
+        gradient_threshold = np.percentile(gradient_values, 65)
+        textured = texture_weight >= gradient_threshold
+        if not np.any(textured):
+            textured = valid
+
+        values = radial[textured]
+        weights = texture_weight[textured]
+        if values.size == 0:
+            return 0.0
+
+        lo, hi = np.percentile(values, [10, 90])
+        trimmed = (values >= lo) & (values <= hi)
+        if np.any(trimmed):
+            values = values[trimmed]
+            weights = weights[trimmed]
+
+        weight_sum = float(np.sum(weights))
+        if weight_sum <= 1e-6:
+            return float(np.mean(values))
+        return float(np.sum(values * weights) / weight_sum)
+
+    def _stabilize_flow_signal(self, raw_flow, window, percentile, threshold_multiplier):
+        smoothed = uniform_filter1d(raw_flow.astype(float), size=window)
+        smoothed = smoothed - np.median(smoothed)
+        magnitude = np.abs(smoothed)
+        threshold = max(float(np.percentile(magnitude, percentile)) * threshold_multiplier, 1e-6)
+        smoothed[magnitude < threshold] = 0.0
+        return smoothed, threshold
+
+    def _estimate_turning_point(self, smoothed, threshold):
+        positive = np.maximum(smoothed - threshold, 0.0)
+        negative = np.maximum(-smoothed - threshold, 0.0)
+
+        pos_cum = np.concatenate([[0.0], np.cumsum(positive)])
+        neg_cum = np.concatenate([[0.0], np.cumsum(negative)])
+
+        total_pos = pos_cum[-1] + 1e-6
+        total_neg = neg_cum[-1] + 1e-6
+
+        start = max(10, len(pos_cum) // 7)
+        stop = min(len(pos_cum) - 10, (6 * len(pos_cum)) // 7)
+        best_score = -np.inf
+        best_turn = len(pos_cum) // 2
+
+        for turn in range(start, stop):
+            outbound = pos_cum[turn]
+            inbound = neg_cum[-1] - neg_cum[turn]
+            wrong_before = neg_cum[turn]
+            wrong_after = pos_cum[-1] - pos_cum[turn]
+
+            balance_penalty = abs((outbound / total_pos) - (inbound / total_neg))
+            score = outbound + inbound
+            score -= 0.75 * wrong_before
+            score -= 0.75 * wrong_after
+            score -= 0.25 * balance_penalty * (outbound + inbound)
+
+            if score > best_score:
+                best_score = score
+                best_turn = turn
+
+        return int(best_turn)
+
+    def _integrate_path(
+        self,
+        smoothed,
+        turning_point,
+        threshold,
+        channel_length,
+        gamma_outbound=1.0,
+        gamma_inbound=1.0,
+        smooth_window=None,
+    ):
+        positive = np.maximum(smoothed - threshold, 0.0) ** gamma_outbound
+        negative = np.maximum(-smoothed - threshold, 0.0) ** gamma_inbound
+
+        pos_cum = np.concatenate([[0.0], np.cumsum(positive)])
+        neg_cum = np.concatenate([[0.0], np.cumsum(negative)])
+
+        outbound_total = max(pos_cum[turning_point], 1e-6)
+        inbound_total = max(neg_cum[-1] - neg_cum[turning_point], 1e-6)
+
+        movement_path = np.empty(len(pos_cum), dtype=float)
+        movement_path[:turning_point + 1] = pos_cum[:turning_point + 1] * (channel_length / outbound_total)
+
+        inbound_progress = neg_cum[turning_point:] - neg_cum[turning_point]
+        movement_path[turning_point:] = channel_length - inbound_progress * (channel_length / inbound_total)
+
+        if smooth_window is None:
+            smooth_window = self._window_from_length(len(movement_path), 40, 19)
+        movement_path = uniform_filter1d(movement_path, size=smooth_window, mode="nearest")
+        movement_path = np.clip(movement_path, 0.0, channel_length)
+        return self._enforce_unimodal(movement_path, turning_point, channel_length)
+
+    def _enforce_unimodal(self, movement_path, turning_point, channel_length):
+        path = np.asarray(movement_path, dtype=float).copy()
+        turn = int(np.clip(turning_point, 1, max(len(path) - 2, 1)))
+        path[:turn + 1] = np.maximum.accumulate(path[:turn + 1])
+        path[turn:] = np.minimum.accumulate(path[turn:])
+        path = np.clip(path, 0.0, channel_length)
+        path[0] = 0.0
+        path[turn] = channel_length
+        path[-1] = 0.0
+        return path
+
+    def _path_to_direction(self, movement_path, turning_point, channel_length):
+        smooth_window = max(3, min(13, len(movement_path) // 60))
+        if smooth_window % 2 == 0:
+            smooth_window += 1
+        smoothed_path = uniform_filter1d(np.asarray(movement_path, dtype=float), size=smooth_window, mode="nearest")
+        delta = np.diff(smoothed_path, prepend=smoothed_path[0])
+
+        threshold = max(channel_length / max(len(movement_path) * 15.0, 1.0), 1e-4)
+        direction = np.zeros(len(movement_path), dtype=float)
+        direction[delta > threshold] = 1.0
+        direction[delta < -threshold] = -1.0
+
+        quiet_radius = max(2, len(direction) // 200)
+        start = max(0, int(turning_point) - quiet_radius)
+        stop = min(len(direction), int(turning_point) + quiet_radius + 1)
+        direction[start:stop] = 0.0
+        return direction
+
+    def _video_frame_files(self, video_number):
+        frame_dir = os.path.join(self.path_to_videos, str(video_number))
+        if not os.path.isdir(frame_dir):
+            return None
+
+        files = [name for name in os.listdir(frame_dir) if name.endswith(".png")]
+        if not files:
+            return None
+
+        files.sort(key=lambda name: int(os.path.splitext(name)[0]))
+        return frame_dir, files
+
+    def _build_sample_indices(self, num_frames):
+        if num_frames <= 1:
+            return np.array([0], dtype=int)
+
+        indices = np.arange(0, num_frames, _SAMPLE_STRIDE, dtype=int)
+        if indices[-1] != num_frames - 1:
+            indices = np.append(indices, num_frames - 1)
+        return indices
+
+    def _frame_feature(self, gray_frame):
+        prepared = self._prepare_gray_frame(gray_frame)
+        _, _, annulus_weight = self._radial_weight_map(_FLOW_H, _FLOW_W)
+        masked = prepared.astype(np.float32) * annulus_weight
+
+        roi = masked[int(_FLOW_H * 0.08):int(_FLOW_H * 0.72), int(_FLOW_W * 0.12):int(_FLOW_W * 0.88)]
+        small = cv2.resize(roi, (16, 12), interpolation=cv2.INTER_AREA).astype(np.float32)
+        grad_x = cv2.Sobel(small, cv2.CV_32F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(small, cv2.CV_32F, 0, 1, ksize=3)
+        col_profile = np.mean(small, axis=0)
+        row_profile = np.mean(small, axis=1)
+
+        feature = np.concatenate([small.ravel(), grad_x.ravel(), grad_y.ravel(), col_profile, row_profile])
+        feature = (feature - np.mean(feature)) / (np.std(feature) + 1e-6)
+        return feature.astype(np.float32)
+
+    def _load_or_compute_feature_bank(self, video_number):
+        os.makedirs(_FEATURE_CACHE_DIR, exist_ok=True)
+        cache_path = os.path.join(_FEATURE_CACHE_DIR, f"{_FEATURE_CACHE_VERSION}_video_{video_number}.npz")
+        if os.path.exists(cache_path):
+            cached = np.load(cache_path)
+            return {
+                "sample_indices": cached["sample_indices"],
+                "features": cached["features"],
+                "num_frames": int(cached["num_frames"][0]),
+                "label_len": int(cached["label_len"][0]),
+                "progress": cached["progress"],
+                "valid_progress": cached["valid_progress"].astype(bool),
+            }
+
+        frame_info = self._video_frame_files(video_number)
+        if frame_info is None:
+            return None
+        frame_dir, files = frame_info
+
+        sample_indices = self._build_sample_indices(len(files))
+        features = []
+        for index in sample_indices:
+            image = cv2.imread(os.path.join(frame_dir, files[index]), cv2.IMREAD_GRAYSCALE)
+            if image is None:
+                features.append(np.zeros(632, dtype=np.float32))
+            else:
+                features.append(self._frame_feature(image))
+        features = np.stack(features)
+
+        label_path = os.path.join(PROJECT_ROOT, "distance_labels", f"{video_number}.npy")
+        progress = np.full(sample_indices.shape[0], np.nan, dtype=np.float32)
+        valid_progress = np.zeros(sample_indices.shape[0], dtype=bool)
+        label_len = 0
+        if os.path.exists(label_path):
+            labels = np.load(label_path)
+            label_len = int(len(labels))
+            valid_progress = sample_indices < label_len
+            if np.any(valid_progress):
+                progress[valid_progress] = np.clip(
+                    labels[sample_indices[valid_progress]] / max(self.channel_lengths[video_number - 1], 1e-6),
+                    0.0,
+                    1.0,
+                ).astype(np.float32)
+
+        np.savez_compressed(
+            cache_path,
+            sample_indices=sample_indices,
+            features=features,
+            num_frames=np.array([len(files)], dtype=np.int32),
+            label_len=np.array([label_len], dtype=np.int32),
+            progress=progress,
+            valid_progress=valid_progress.astype(np.uint8),
+        )
+        return {
+            "sample_indices": sample_indices,
+            "features": features,
+            "num_frames": len(files),
+            "label_len": label_len,
+            "progress": progress,
+            "valid_progress": valid_progress,
+        }
+
+    def _video_summary(self, features):
+        if features.shape[0] == 0:
+            return None
+        positions = np.linspace(0, features.shape[0] - 1, 5, dtype=int)
+        summary = features[positions].reshape(-1)
+        norm = np.linalg.norm(summary) + 1e-6
+        return summary / norm
+
+    def _cosine_similarity(self, a, b):
+        if a is None or b is None:
+            return -1.0
+        return float(np.dot(a, b) / ((np.linalg.norm(a) + 1e-6) * (np.linalg.norm(b) + 1e-6)))
+
+    def _template_transfer_path(self, video_number, channel_length, full_length):
+        target_bank = self._load_or_compute_feature_bank(video_number)
+        if target_bank is None or target_bank["features"].shape[0] < 5:
+            return None, None
+
+        target_features = target_bank["features"].astype(np.float32)
+        target_norm = target_features / (np.linalg.norm(target_features, axis=1, keepdims=True) + 1e-6)
+        target_summary = self._video_summary(target_features)
+
+        reference_sets = []
+        for ref_video in _LABELED_VIDEOS:
+            if ref_video == video_number:
+                continue
+
+            ref_bank = self._load_or_compute_feature_bank(ref_video)
+            if ref_bank is None:
+                continue
+
+            valid_mask = ref_bank["valid_progress"]
+            if not np.any(valid_mask):
+                continue
+
+            ref_features = ref_bank["features"][valid_mask].astype(np.float32)
+            ref_progress = ref_bank["progress"][valid_mask].astype(np.float32)
+            ref_norm = ref_features / (np.linalg.norm(ref_features, axis=1, keepdims=True) + 1e-6)
+
+            ref_summary = self._video_summary(ref_features)
+            similarity = self._cosine_similarity(target_summary, ref_summary)
+            length_similarity = np.exp(
+                -abs(self.channel_lengths[ref_video - 1] - channel_length) / max(channel_length, 1e-6)
+            )
+            score = 0.75 * similarity + 0.25 * float(length_similarity)
+            reference_sets.append((score, ref_norm, ref_progress))
+
+        if not reference_sets:
+            return None, None
+
+        reference_sets.sort(key=lambda item: item[0], reverse=True)
+        selected = reference_sets[:4]
+
+        ref_features = np.concatenate([item[1] for item in selected], axis=0)
+        ref_progress = np.concatenate([item[2] for item in selected], axis=0)
+        ref_video_weights = np.concatenate([
+            np.full(item[1].shape[0], max(item[0], 0.05), dtype=np.float32) for item in selected
+        ])
+
+        predictions = []
+        k = min(11, ref_features.shape[0])
+        for feature in target_norm:
+            distances = np.sum((ref_features - feature) ** 2, axis=1)
+            nearest = np.argpartition(distances, k - 1)[:k]
+            weights = ref_video_weights[nearest] / (distances[nearest] + 1e-6)
+            predictions.append(float(np.sum(weights * ref_progress[nearest]) / np.sum(weights)))
+
+        progress = np.clip(np.asarray(predictions, dtype=np.float32), 0.0, 1.0)
+        smooth_window = max(5, min(21, len(progress) // 25))
+        if smooth_window % 2 == 0:
+            smooth_window += 1
+        progress = uniform_filter1d(progress, size=smooth_window, mode="nearest")
+
+        template_turn_sample = int(np.argmax(progress))
+        template_path_sampled = self._enforce_unimodal(progress * channel_length, template_turn_sample, channel_length)
+
+        template_path = np.interp(
+            np.arange(full_length, dtype=np.float32),
+            target_bank["sample_indices"].astype(np.float32),
+            template_path_sampled.astype(np.float32),
+        ).astype(np.float32)
+        template_turn = int(target_bank["sample_indices"][template_turn_sample])
+        template_path = self._enforce_unimodal(template_path, template_turn, channel_length)
+        return template_path, template_turn
 
     def _flow_from_mp4(self, video_path, video_number):
         cap = cv2.VideoCapture(video_path)
@@ -158,9 +523,8 @@ class MovementPathEstimator:
             return None
 
         first_kept = _FIRST_KEPT_FRAME.get(video_number, 0)
-        last_kept  = _LAST_KEPT_FRAME.get(video_number, None)
+        last_kept = _LAST_KEPT_FRAME.get(video_number, None)
 
-        # Skip leading frames (grab is faster than read — no decode)
         for _ in range(first_kept):
             if not cap.grab():
                 cap.release()
@@ -171,7 +535,7 @@ class MovementPathEstimator:
             cap.release()
             return None
 
-        prev = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (_FLOW_W, _FLOW_H))
+        prev = self._prepare_gray_frame(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
         rdx, rdy, weight = self._radial_weight_map(_FLOW_H, _FLOW_W)
         flow_values = []
         idx = first_kept + 1
@@ -183,23 +547,18 @@ class MovementPathEstimator:
             if last_kept is not None and idx > last_kept:
                 break
 
-            curr = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (_FLOW_W, _FLOW_H))
-            fv = self._dis.calc(prev, curr, None)
-            # Positive radial flow = features diverge from centre = probe moving forward
-            radial = fv[..., 0] * rdx + fv[..., 1] * rdy
-            # Masked median: more robust to water/reflections than weighted mean
-            valid = radial[weight > 0.1]
-            flow_values.append(float(np.median(valid)) if valid.size else 0.0)
+            curr = self._prepare_gray_frame(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+            flow_values.append(self._estimate_signed_radial_flow(prev, curr, rdx, rdy, weight))
             prev = curr
             idx += 1
 
         cap.release()
-        return np.array(flow_values, dtype=float) if flow_values else None
+        return np.asarray(flow_values, dtype=float) if flow_values else None
 
     def _flow_from_images(self, frame_dir):
         files = sorted(
-            [f for f in os.listdir(frame_dir) if f.endswith('.png')],
-            key=lambda f: int(os.path.splitext(f)[0]),
+            [name for name in os.listdir(frame_dir) if name.endswith(".png")],
+            key=lambda name: int(os.path.splitext(name)[0]),
         )
         if len(files) < 2:
             return None
@@ -208,42 +567,32 @@ class MovementPathEstimator:
         if first_img is None:
             return None
 
-        prev = cv2.resize(first_img, (_FLOW_W, _FLOW_H))
+        prev = self._prepare_gray_frame(first_img)
         rdx, rdy, weight = self._radial_weight_map(_FLOW_H, _FLOW_W)
         flow_values = []
 
-        for fname in files[1:]:
-            img = cv2.imread(os.path.join(frame_dir, fname), cv2.IMREAD_GRAYSCALE)
-            if img is None:
+        for file_name in files[1:]:
+            image = cv2.imread(os.path.join(frame_dir, file_name), cv2.IMREAD_GRAYSCALE)
+            if image is None:
                 continue
-            curr = cv2.resize(img, (_FLOW_W, _FLOW_H))
-            fv = self._dis.calc(prev, curr, None)
-            radial = fv[..., 0] * rdx + fv[..., 1] * rdy
-            valid = radial[weight > 0.1]
-            flow_values.append(float(np.median(valid)) if valid.size else 0.0)
+
+            curr = self._prepare_gray_frame(image)
+            flow_values.append(self._estimate_signed_radial_flow(prev, curr, rdx, rdy, weight))
             prev = curr
 
-        return np.array(flow_values, dtype=float) if flow_values else None
-
-    # ------------------------------------------------------------------ #
-    #  Framework boilerplate                                               #
-    # ------------------------------------------------------------------ #
+        return np.asarray(flow_values, dtype=float) if flow_values else None
 
     def execute_estimations(self):
         if self.test_all_videos:
             available = []
-            for n in range(1, 12):
-                vname = _VIDEOS.get(n, '')
-                has_mp4 = os.path.exists(os.path.join(self.data_dir, vname))
-                fdir = os.path.join(self.path_to_videos, str(n))
-                has_frames = os.path.exists(fdir) and any(
-                    f.endswith('.png') for f in os.listdir(fdir)
-                )
-                if has_mp4 or has_frames:
-                    available.append(n)
-            for n in available:
-                print(f"Processing video {n} ...")
-                self._run_single(n)
+            for video_number in range(1, 12):
+                frame_dir = os.path.join(self.path_to_videos, str(video_number))
+                has_frames = os.path.exists(frame_dir) and any(name.endswith(".png") for name in os.listdir(frame_dir))
+                if self._resolve_video_path(video_number) is not None or has_frames:
+                    available.append(video_number)
+            for video_number in available:
+                print(f"Processing video {video_number} ...")
+                self._run_single(video_number)
         else:
             self._run_single(self.video_num_to_test)
 
@@ -253,8 +602,22 @@ class MovementPathEstimator:
         except Exception:
             print("Cannot load channel length, using 100 m")
             channel_length = 100.0
-        movement_path, turning_point, movement_direction = \
-            self.calculate_movement_path_and_turning_point(int(video_number), channel_length)
-        self.calculated_movement_paths[int(video_number)] = MovementPath(
-            int(video_number), movement_path, movement_direction, turning_point
+
+        movement_path, turning_point, movement_direction = self.calculate_movement_path_and_turning_point(
+            int(video_number),
+            channel_length,
         )
+        self.calculated_movement_paths[int(video_number)] = MovementPath(
+            int(video_number),
+            movement_path,
+            movement_direction,
+            turning_point,
+        )
+
+
+if __name__ == "__main__":
+    print("MovementPathEstimator.py defines the estimator class.")
+    print("For a quick sanity check, run: python ..\\quick_check.py")
+    print("For one labeled video with optional plot, run: python ..\\estimate_single_movement_path.py [video_num]")
+    print("For plot plus frame preview, run: python ..\\run_baseline.py [video_num]")
+    print("For video playback plus live path plot, run: python visualize.py [video_num] [speed]")

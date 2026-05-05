@@ -4,7 +4,7 @@ Visualization: video frame (top) + real-time distance plot (bottom).
 Usage (from project root):
     python mySolution/visualize.py [video_num] [speed]
 
-    video_num : 1-10  (default 1)
+    video_num : 1-11  (default 1)
     speed     : frames to advance per display tick (default 5)
                 press +/- while running to adjust live
                 press q or ESC to quit
@@ -18,6 +18,8 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from mySolution.MovementPathEstimator import MovementPathEstimator, _VIDEOS, _FIRST_KEPT_FRAME, _LAST_KEPT_FRAME
+from EstimationRater import EstimationRater
+from MovementPath import MovementPath
 
 DISPLAY_W = 1024
 VIDEO_H   = 576
@@ -71,18 +73,34 @@ def main():
 
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     os.chdir(project_root)
-    data_dir = os.path.join(project_root, "data")
+    data_dirs = [
+        os.path.join(project_root, "data"),
+        os.path.join(project_root, "Videos"),
+        os.path.join(project_root, "videos"),
+    ]
 
     channel_lengths = np.load("channel_lengths.npy")
     channel_length  = float(channel_lengths[video_num - 1])
 
-    print(f"Estimating movement path for video {video_num} …")
+    print(f"Estimating movement path for video {video_num}...")
     estimator = MovementPathEstimator(video_num, False)
     estimator.execute_estimations()
     estimated = estimator.calculated_movement_paths[video_num].movement_path
 
     gt_path  = f"distance_labels/{video_num}.npy"
     measured = np.load(gt_path) if os.path.exists(gt_path) else None
+    if measured is not None:
+        rater = EstimationRater(
+            {0: estimator.calculated_movement_paths[video_num]},
+            {0: MovementPath(video_num, measured)},
+            do_print=True,
+            do_plot=False,
+            estimator_name=type(estimator).__name__,
+            video_num=video_num,
+        )
+        rater.rate()
+    else:
+        print(f"No ground-truth label available for video {video_num}.")
 
     n_frames = len(estimated)
     renderer = PlotRenderer(n_frames, channel_length, measured is not None)
@@ -98,7 +116,16 @@ def main():
         )
         cap = None
     else:
-        vid_path = os.path.join(data_dir, _VIDEOS.get(video_num, ""))
+        vid_path = None
+        for data_dir in data_dirs:
+            candidate = os.path.join(data_dir, _VIDEOS.get(video_num, ""))
+            if os.path.exists(candidate):
+                vid_path = candidate
+                break
+        if vid_path is None:
+            raise FileNotFoundError(
+                f"Could not find video {video_num} in frame_images/, data/, Videos/, or videos/."
+            )
         cap = cv2.VideoCapture(vid_path)
         for _ in range(_FIRST_KEPT_FRAME.get(video_num, 0)):
             cap.grab()

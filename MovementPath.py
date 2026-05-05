@@ -25,13 +25,14 @@ class MovementPath:
         return first_index + (last_index-first_index)/2
 
     def calculate_movement_direction(self):
-        movement_direction = self.movement_path
-        print(movement_direction.shape[0])
-        movement_direction = movement_direction[1:] - movement_direction[:-1]
+        if self.movement_path.shape[0] <= 1:
+            return np.zeros_like(self.movement_path)
+
+        movement_direction = self.movement_path[1:] - self.movement_path[:-1]
         movement_direction[:180] = 0
         movement_direction[-100:] = 0
-        threshold = np.max(movement_direction)/6
+        threshold = np.max(np.abs(movement_direction)) / 6 if movement_direction.size else 0
         movement_direction[(movement_direction >= -threshold) & (movement_direction <= threshold)] = 0
         movement_direction = np.sign(movement_direction)
-        movement_direction = np.append(movement_direction, [-1])
+        movement_direction = np.append(movement_direction, [0])
         return movement_direction
