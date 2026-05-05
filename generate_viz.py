@@ -113,53 +113,46 @@ html,body{width:100%;height:100%;overflow:hidden;
 body::after{content:'';position:fixed;inset:0;pointer-events:none;
   background:repeating-linear-gradient(0deg,transparent,transparent 3px,rgba(0,0,0,.03) 3px,rgba(0,0,0,.03) 4px)}
 
-/* ── Callout annotation modules ───────────────────── */
-.ann{
-  position:fixed;
-  background:rgba(3,7,18,0.88);
-  border:1.5px solid rgba(0,180,255,0.45);
-  border-radius:6px;
-  padding:16px 22px;
-  max-width:310px;
-  opacity:0;pointer-events:none;z-index:200;
-  transition:opacity .7s ease, transform .7s cubic-bezier(.16,.84,.44,1);}
-.ann.show{opacity:1;transform:none!important;}
-/* line + dot extending to the right */
-.ann.r{transform:translateX(-18px)}
-.ann.r::after{
-  content:'';
-  position:absolute;right:calc(-52px);top:50%;
-  width:44px;height:1.5px;
-  background:linear-gradient(90deg,rgba(0,180,255,.55),rgba(0,180,255,.0));
-  transform:translateY(-50%);}
-.ann.r::before{
-  content:'';
-  position:absolute;right:calc(-56px);top:50%;
-  width:9px;height:9px;border-radius:50%;
-  background:rgba(0,180,255,.85);
-  box-shadow:0 0 10px rgba(0,180,255,.7);
-  transform:translate(50%,-50%);}
-/* line + dot extending to the left */
-.ann.l{transform:translateX(18px)}
-.ann.l::after{
-  content:'';
-  position:absolute;left:calc(-52px);top:50%;
-  width:44px;height:1.5px;
-  background:linear-gradient(270deg,rgba(0,180,255,.55),rgba(0,180,255,.0));
-  transform:translateY(-50%);}
-.ann.l::before{
-  content:'';
-  position:absolute;left:calc(-56px);top:50%;
-  width:9px;height:9px;border-radius:50%;
-  background:rgba(0,180,255,.85);
-  box-shadow:0 0 10px rgba(0,180,255,.7);
-  transform:translate(-50%,-50%);}
-.ann-title{
-  font-size:15px;font-weight:700;letter-spacing:.04em;
+/* ── Implementation panel (left side) ───────────────── */
+#ann-panel{
+  position:fixed;left:24px;top:80px;
+  width:332px;
+  background:rgba(2,5,16,0.90);
+  backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px);
+  border:1px solid rgba(0,170,255,0.22);
+  border-radius:10px;overflow:hidden;
+  pointer-events:none;z-index:200;}
+#ann-header{
+  padding:13px 18px 10px;
+  border-bottom:1px solid rgba(0,170,255,0.14);
+  display:flex;align-items:center;gap:10px;}
+#ann-header-label{
+  font-size:8px;letter-spacing:.26em;text-transform:uppercase;
+  color:rgba(0,180,255,.65);flex:1;font-weight:600;}
+#ann-header-count{font-size:8px;letter-spacing:.1em;color:rgba(255,255,255,.22);}
+#ann-items{overflow:hidden;}
+.ann-item{
+  padding:13px 18px;
+  border-bottom:1px solid rgba(255,255,255,0.04);
+  display:flex;gap:14px;align-items:flex-start;
+  overflow:hidden;
+  max-height:200px; /* used by eviction collapse */
+  opacity:0;transform:translateY(10px);
+  transition:opacity .7s ease,transform .7s cubic-bezier(.16,.84,.44,1),
+             background .5s ease,opacity .5s ease;}
+.ann-item.show{opacity:1;transform:translateY(0);}
+.ann-item.active{background:rgba(0,155,255,0.08);}
+.ann-item.past{opacity:0.35;}
+.ann-num{
+  font-size:10px;font-weight:800;color:rgba(0,185,255,0.85);
+  letter-spacing:.05em;min-width:22px;padding-top:2px;
+  font-variant-numeric:tabular-nums;}
+.ann-item-title{
+  font-size:12px;font-weight:700;letter-spacing:.045em;text-transform:uppercase;
   color:#ffffff;line-height:1.3;}
-.ann-body{
-  font-size:11.5px;font-weight:500;letter-spacing:.03em;
-  color:rgba(180,215,255,0.85);margin-top:7px;line-height:1.55;}
+.ann-item-body{
+  font-size:10.5px;font-weight:500;letter-spacing:.02em;
+  color:rgba(185,215,255,0.78);margin-top:5px;line-height:1.58;}
 
 #start-overlay{
   position:fixed;inset:0;z-index:999;
@@ -195,6 +188,15 @@ body::after{content:'';position:fixed;inset:0;pointer-events:none;
 
 <!-- Camera badge -->
 <div id="cam-badge" class="glass">🎥 ORBIT VIEW</div>
+
+<!-- Implementation panel -->
+<div id="ann-panel">
+  <div id="ann-header">
+    <span id="ann-header-label">Pipeline Implementation</span>
+    <span id="ann-header-count">0 / 6</span>
+  </div>
+  <div id="ann-items"></div>
+</div>
 
 <!-- Stats -->
 <div id="hud-stats" class="glass">
@@ -513,9 +515,9 @@ function updateState(fi, dist){
   const fwd   = fi <= D.turning_point;
 
   // Annotation triggers
-  if(pct < lastPct-0.08) annShown.clear();
+  if(pct < lastPct-0.08){ annShown.clear(); document.getElementById('ann-items').innerHTML=''; document.getElementById('ann-header-count').textContent='0 / '+ANN.length; }
   lastPct=pct;
-  ANN.forEach(a=>{ if(!annShown.has(a.pct)&&pct>=a.pct){ annShown.add(a.pct); showAnn(a); } });
+  ANN.forEach((a,i)=>{ if(!annShown.has(a.pct)&&pct>=a.pct){ annShown.add(a.pct); showAnn(a,i); } });
 
   probe.position.z = distToZ(dist);
   headLight.position.set(0, 0, probe.position.z + LZ + 0.05);
@@ -541,22 +543,46 @@ function updateState(fi, dist){
 }
 // ── Floating annotation system
 const ANN=[
-  {pct:.001, title:'DIS Optical Flow',        body:'Dense Inverse Search algorithm computes pixel-level displacement between consecutive video frames in real time.',       side:'r', left:'3%',  top:'22%'},
-  {pct:.18, title:'Radial Flow Weighting',   body:'Only radially-directed motion (toward or away from the camera centre) is integrated — lateral swirl is discarded.',      side:'l', right:'3%', top:'20%'},
-  {pct:.35, title:'Cumulative Integration',  body:'Weighted flow values are summed frame-by-frame to produce a monotonically increasing depth estimate.',                    side:'r', left:'3%',  top:'48%'},
-  {pct:.52, title:'Turning Point Detection', body:'A sign reversal in the cumulative flow curve marks the moment the probe stops advancing and begins its return journey.',  side:'l', right:'3%', top:'44%'},
-  {pct:.68, title:'DTW Return Alignment',    body:'Dynamic Time Warping warps the return-path flow sequence onto the forward reference, correcting speed variation.',         side:'r', left:'3%',  top:'65%'},
-  {pct:.86, title:'Final Distance Estimate', body:'The predicted distance curve is validated against ground-truth labels, achieving sub-5\u0025 mean absolute error.',         side:'l', right:'3%', top:'62%'},
+  {pct:.001, title:'DIS Optical Flow',
+   body:'The Dense Inverse Search (DIS) algorithm computes dense optical flow between consecutive video frames, tracking the movement of every pixel in real time at high efficiency.'},
+  {pct:.16, title:'Radial Flow Extraction',
+   body:'A radial weight map centred on the image focuses on motion directed toward or away from the camera. Lateral rotation and swirl are suppressed, isolating depth-relevant signal.'},
+  {pct:.33, title:'Cumulative Distance Integration',
+   body:'Per-frame radial flow medians are accumulated into a monotonically increasing distance estimate, converting raw pixel motion into metres of probe travel.'},
+  {pct:.51, title:'Turning Point Detection',
+   body:'A sign reversal in the smoothed cumulative flow curve is detected automatically, identifying the exact frame at which the probe transitions from forward travel to the return journey.'},
+  {pct:.67, title:'DTW Return-Path Alignment',
+   body:'Dynamic Time Warping aligns the return-journey flow sequence against the forward reference, correcting for speed variation and producing a coherent full-cycle distance curve.'},
+  {pct:.84, title:'Prediction & Validation',
+   body:'The final predicted distance curve is compared against ground-truth measurement labels. Our method achieves a mean absolute error within 5\u0025 across all test videos.'},
 ];
 let annShown=new Set(), lastPct=-1;
-function showAnn(a){
+function showAnn(a,idx){
+  const items=document.getElementById('ann-items');
+  const existing=[...items.querySelectorAll('.ann-item')];
+  // Evict oldest when panel is full (>= 5 items)
+  if(existing.length>=5){
+    const first=existing[0];
+    const h=first.offsetHeight;
+    first.style.maxHeight=h+'px';
+    first.style.overflow='hidden';
+    requestAnimationFrame(()=>{
+      first.style.transition='opacity .38s ease,max-height .44s ease,padding-top .44s ease,padding-bottom .44s ease';
+      first.style.opacity='0';
+      first.style.maxHeight='0';
+      first.style.paddingTop='0';
+      first.style.paddingBottom='0';
+      setTimeout(()=>first.remove(),460);
+    });
+  }
+  existing.forEach(el=>{ el.classList.remove('active'); el.classList.add('past'); });
+  const num=String(idx+1).padStart(2,'0');
   const el=document.createElement('div');
-  el.className='ann '+a.side;
-  el.style.cssText=(a.left?'left:'+a.left:'')+';'+(a.right?'right:'+a.right:'')+';top:'+a.top;
-  el.innerHTML=`<div class="ann-title">${a.title}</div><div class="ann-body">${a.body}</div>`;
-  document.body.appendChild(el);
+  el.className='ann-item active';
+  el.innerHTML=`<div class="ann-num">${num}</div><div><div class="ann-item-title">${a.title}</div><div class="ann-item-body">${a.body}</div></div>`;
+  items.appendChild(el);
+  document.getElementById('ann-header-count').textContent=(idx+1)+' / '+ANN.length;
   requestAnimationFrame(()=>requestAnimationFrame(()=>el.classList.add('show')));
-  setTimeout(()=>{ el.classList.remove('show'); setTimeout(()=>el.remove(),750); },13000);
 }
 
 updateState(0, 0);
