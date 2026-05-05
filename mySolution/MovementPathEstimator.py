@@ -2,6 +2,7 @@ import numpy as np
 import os
 
 from MovementPath import MovementPath
+from .localization_model import predict_video_path
 
 
 class MovementPathEstimator:
@@ -36,35 +37,11 @@ class MovementPathEstimator:
 
         self.calculated_movement_paths = {}
 
-    # ------------------------------------------------------------------ #
-    #  TODO: implement your solution here                                  #
-    # ------------------------------------------------------------------ #
-
     def calculate_movement_path_and_turning_point(self, video_number, channel_length):
         """
         Estimate the movement path for a single video.
-
-        The dummy implementation below just outputs a symmetric triangle
-        (forward then backward) that fills the whole video, replace it
-        with your actual logic.
         """
-        path_to_video = self.path_to_videos + str(video_number)
-        num_frames = len(os.listdir(path_to_video))
-
-        # --- replace everything below with your implementation ---
-        half = num_frames // 2
-        movement_path = np.concatenate([
-            np.linspace(0, channel_length, half),
-            np.linspace(channel_length, 0, num_frames - half),
-        ])
-        movement_direction = np.concatenate([
-            np.ones(half),
-            -np.ones(num_frames - half),
-        ])
-        turning_point = float(half)
-        # ---------------------------------------------------------
-
-        return movement_path, turning_point, movement_direction
+        return predict_video_path(int(video_number), float(channel_length))
 
     # ------------------------------------------------------------------ #
     #  Framework boilerplate – you should not need to change this          #

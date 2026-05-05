@@ -1,0 +1,8 @@
+video=11
+turn=642
+inward_to_return_dtw_cost=1.019540
+inward_to_return_mae=1.324014
+triangle_return_mae=3.302318
+return_to_inward_dtw_cost=1.019097
+return_to_inward_mae=1.378670
+triangle_inward_mae=4.782492

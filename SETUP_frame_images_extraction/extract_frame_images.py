@@ -40,9 +40,11 @@ VIDEOS = {
 }
 
 # First frame to keep per channel; all frames before this number are deleted.
+# These cutoffs mark the first useful/relevant timestamp in each video.
+# Videos are 5 fps, so e.g. 1:29 -> 89 * 5 = frame 445.
 FIRST_KEPT_FRAME = {
-    1: 180, 2: 56, 3: 58, 4: 30, 5: 55, 6: 58,
-    7: 330, 8: 100, 9: 35, 10: 42, 11: 314,
+    1: 445, 2: 225, 3: 195, 4: 310, 5: 225, 6: 235,
+    7: 400, 8: 175, 9: 110, 10: 115, 11: 400,
 }
 
 # Last frame to keep per channel; frames after this number are deleted (None = keep all).
