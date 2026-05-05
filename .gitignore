@@ -14,6 +14,7 @@ output/
 logs/
 checkpoints/
 frame_images*
+bonus_frame_images*
 frame_images.zip
 *videos*
 
