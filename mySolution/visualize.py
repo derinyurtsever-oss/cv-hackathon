@@ -128,7 +128,8 @@ def main():
                 break
 
         # ── Video panel ─────────────────────────────────────────────────
-        video_panel = cv2.resize(bgr, (DISPLAY_W, VIDEO_H))
+        crop_h = int(bgr.shape[0] * 0.70)   # keep top 70%, cut water region
+        video_panel = cv2.resize(bgr[:crop_h, :], (DISPLAY_W, VIDEO_H))
 
         dist = float(estimated[min(frame_idx, n_frames - 1)])
         label = f"{dist:.1f} m"
